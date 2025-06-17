@@ -8,6 +8,11 @@ class OrderSettingsWidget(QWidget):
         self.condition_windows = []  # 열린 조건검색 창들 추적
         self.debug_console = None  # 디버그 콘솔
         self.token = None  # 토큰 저장
+        
+        # 자동매매 관련
+        self.auto_trading_service = None
+        self.auto_trading_active = False
+        
         self.setup_ui()
         
     def setup_ui(self):
@@ -25,6 +30,10 @@ class OrderSettingsWidget(QWidget):
         
         main_layout.addLayout(debug_layout)
         
+        # 자동매매 상태 표시 패널
+        status_group = self.create_status_group()
+        main_layout.addWidget(status_group)
+        
         # 매수 설정 그룹
         buy_group = self.create_buy_group()
         main_layout.addWidget(buy_group)
@@ -33,21 +42,62 @@ class OrderSettingsWidget(QWidget):
         sell_group = self.create_sell_group()
         main_layout.addWidget(sell_group)
         
-        # 저장 버튼
-        save_layout = QHBoxLayout()
-        save_layout.addStretch()
+        # 저장 및 제어 버튼
+        control_layout = QHBoxLayout()
+        control_layout.addStretch()
         
         self.save_btn = QPushButton("설정 저장")
         self.save_btn.clicked.connect(self.save_settings)
         self.save_btn.setMinimumWidth(100)
         
-        save_layout.addWidget(self.save_btn)
-        main_layout.addLayout(save_layout)
+        self.start_auto_btn = QPushButton("🚀 자동매매 시작")
+        self.start_auto_btn.clicked.connect(self.start_auto_trading)
+        self.start_auto_btn.setMinimumWidth(120)
+        self.start_auto_btn.setEnabled(False)
+        
+        self.stop_auto_btn = QPushButton("⏹️ 자동매매 중지")
+        self.stop_auto_btn.clicked.connect(self.stop_auto_trading)
+        self.stop_auto_btn.setMinimumWidth(120)
+        self.stop_auto_btn.setVisible(False)
+        
+        control_layout.addWidget(self.save_btn)
+        control_layout.addWidget(self.start_auto_btn)
+        control_layout.addWidget(self.stop_auto_btn)
+        main_layout.addLayout(control_layout)
         
         # 여백 추가
         main_layout.addStretch()
         
         self.setLayout(main_layout)
+        
+    def create_status_group(self):
+        """자동매매 상태 표시 그룹"""
+        group = QGroupBox("자동매매 상태")
+        layout = QGridLayout()
+        
+        # 상태 표시
+        layout.addWidget(QLabel("상태:"), 0, 0)
+        self.status_label = QLabel("대기 중")
+        self.status_label.setStyleSheet("color: #7f8c8d; font-weight: bold;")
+        layout.addWidget(self.status_label, 0, 1)
+        
+        # 보유 종목 수
+        layout.addWidget(QLabel("보유 종목:"), 0, 2)
+        self.position_count_label = QLabel("0개")
+        layout.addWidget(self.position_count_label, 0, 3)
+        
+        # 대기 주문
+        layout.addWidget(QLabel("대기 주문:"), 1, 0)
+        self.pending_orders_label = QLabel("0개")
+        layout.addWidget(self.pending_orders_label, 1, 1)
+        
+        # 모니터링 종목
+        layout.addWidget(QLabel("모니터링:"), 1, 2)
+        self.monitoring_stocks_label = QLabel("0개")
+        layout.addWidget(self.monitoring_stocks_label, 1, 3)
+        
+        group.setLayout(layout)
+        return group
         
     def show_debug_console(self):
         """디버그 콘솔 표시"""
@@ -91,6 +141,9 @@ class OrderSettingsWidget(QWidget):
                 self.condition_service.start_connection()
                 print("✅ 조건검색 서비스 초기화 완료")
                 
+                # 자동매매 서비스 초기화
+                self.init_auto_trading_service()
+                
             except ImportError as e:
                 print(f"❌ 조건검색 모듈 로드 실패: {e}")
                 QMessageBox.warning(self, "모듈 오류", f"조건검색 기능을 사용할 수 없습니다.\n오류: {e}")
@@ -100,9 +153,50 @@ class OrderSettingsWidget(QWidget):
         else:
             print("❌ 토큰이 없어서 조건검색 서비스를 초기화할 수 없습니다")
             
+    def init_auto_trading_service(self):
+        """자동매매 서비스 초기화"""
+        try:
+            from services.auto_trading_service import AutoTradingService
+            
+            if self.auto_trading_service:
+                self.auto_trading_service.cleanup()
+                
+            self.auto_trading_service = AutoTradingService(
+                token=self.token,
+                condition_service=self.condition_service,
+                is_mock=True  # 테스트용으로 모의투자 사용
+            )
+            
+            # 시그널 연결
+            self.auto_trading_service.position_added.connect(self.on_position_added)
+            self.auto_trading_service.trading_status_changed.connect(self.on_trading_status_changed)
+            self.auto_trading_service.debug_message.connect(self.on_debug_message)
+            self.auto_trading_service.error_occurred.connect(self.on_trading_error)
+            
+            # 상태 업데이트 타이머
+            self.status_timer = QTimer()
+            self.status_timer.timeout.connect(self.update_trading_status)
+            self.status_timer.start(5000)  # 5초마다 상태 업데이트
+            
+            print("✅ 자동매매 서비스 초기화 완료")
+            
+        except ImportError as e:
+            print(f"❌ 자동매매 모듈 로드 실패: {e}")
+        except Exception as e:
+            print(f"❌ 자동매매 서비스 초기화 실패: {e}")
+            
     def clear_token(self):
         """토큰 제거 및 서비스 정리"""
         self.token = None
+        
+        # 자동매매 중지
+        if self.auto_trading_service:
+            self.auto_trading_service.cleanup()
+            self.auto_trading_service = None
+            
+        if hasattr(self, 'status_timer'):
+            self.status_timer.stop()
+            
         if self.condition_service:
             self.condition_service.stop_connection()
             self.condition_service = None
@@ -113,6 +207,12 @@ class OrderSettingsWidget(QWidget):
         self.condition_combo.setEnabled(False)
         self.condition_search_btn.setEnabled(False)
         self.condition_combo.setStyleSheet("")
+        
+        # 자동매매 버튼 상태 초기화
+        self.start_auto_btn.setEnabled(False)
+        self.stop_auto_btn.setVisible(False)
+        self.start_auto_btn.setVisible(True)
+        self.auto_trading_active = False
         
         print("🧹 조건검색 서비스 정리 완료")
         
@@ -129,7 +229,7 @@ class OrderSettingsWidget(QWidget):
         # 디버그 콘솔 닫기
         if self.debug_console:
             self.debug_console.close()
-        
+
     def on_connection_status_changed(self, connected):
         """연결 상태 변경 처리"""
         if connected:
@@ -162,7 +262,7 @@ class OrderSettingsWidget(QWidget):
             self.condition_combo.addItem("❌ 연결 실패")
             self.condition_combo.setStyleSheet("color: red;")
             self.condition_search_btn.setEnabled(False)
-            
+
     def create_buy_group(self):
         """매수 설정 그룹 생성"""
         group = QGroupBox("매수 설정")
@@ -225,11 +325,24 @@ class OrderSettingsWidget(QWidget):
         amount_layout.addWidget(self.buy_amount_spin)
         amount_layout.addStretch()
         
+        # 최대 보유 종목 수 설정
+        max_stocks_layout = QHBoxLayout()
+        max_stocks_layout.addWidget(QLabel("최대 보유 종목:"))
+        
+        self.max_stocks_spin = QSpinBox()
+        self.max_stocks_spin.setRange(1, 50)
+        self.max_stocks_spin.setValue(10)  # 기본값 10개
+        self.max_stocks_spin.setSuffix("개")
+        
+        max_stocks_layout.addWidget(self.max_stocks_spin)
+        max_stocks_layout.addStretch()
+        
         # 레이아웃 추가
         layout.addLayout(condition_layout)
         layout.addLayout(buy_type_layout)
         layout.addLayout(price_layout)
         layout.addLayout(amount_layout)
+        layout.addLayout(max_stocks_layout)
         
         group.setLayout(layout)
         
@@ -329,7 +442,8 @@ class OrderSettingsWidget(QWidget):
             'condition_idx': self.condition_combo.currentData(),
             'is_market_order': self.market_buy_radio.isChecked(),
             'price_offset': self.price_offset_spin.value() if self.limit_buy_radio.isChecked() else 0,
-            'amount': self.buy_amount_spin.value()
+            'amount': self.buy_amount_spin.value(),
+            'max_stocks': self.max_stocks_spin.value()
         }
         
     def get_sell_settings(self):
@@ -341,17 +455,27 @@ class OrderSettingsWidget(QWidget):
         }
         
     def save_settings(self):
-        """설정 저장"""
+        """설정 저장 및 자동매매 준비"""
         buy_settings = self.get_buy_settings()
         sell_settings = self.get_sell_settings()
         
-        # 설정 값들을 로그로 출력 (나중에 파일 저장 등으로 변경 가능)
+        # 설정 검증
+        if not buy_settings['condition_idx']:
+            QMessageBox.warning(self, "설정 오류", "조건식을 선택해주세요.")
+            return
+            
+        if not self.token:
+            QMessageBox.warning(self, "로그인 필요", "로그인 후 이용해주세요.")
+            return
+            
+        # 설정 값들을 로그로 출력
         print("=== 주문 설정 저장 ===")
         print(f"매수 조건식: {buy_settings['condition']}")
         print(f"매수 방식: {'시장가' if buy_settings['is_market_order'] else '지정가'}")
         if not buy_settings['is_market_order']:
             print(f"매수 호가: {buy_settings['price_offset']}호가")
         print(f"매수 금액: {buy_settings['amount']:,}원")
+        print(f"최대 보유 종목: {buy_settings['max_stocks']}개")
         
         print(f"매도 조건식: {sell_settings['condition']}")
         print(f"매도 방식: {'시장가' if sell_settings['is_market_order'] else '지정가'}")
@@ -359,8 +483,137 @@ class OrderSettingsWidget(QWidget):
             print(f"매도 호가: {sell_settings['price_offset']}호가")
         print("=====================")
         
+        # 자동매매 시작 버튼 활성화
+        self.start_auto_btn.setEnabled(True)
+        
         # 저장 완료 메시지
-        QMessageBox.information(self, "저장 완료", "주문 설정이 저장되었습니다.")
+        QMessageBox.information(self, "저장 완료", 
+                               "주문 설정이 저장되었습니다.\n"
+                               "'자동매매 시작' 버튼을 눌러 자동매매를 시작할 수 있습니다.")
+        
+    def start_auto_trading(self):
+        """자동매매 시작"""
+        if not self.auto_trading_service:
+            QMessageBox.warning(self, "서비스 오류", "자동매매 서비스가 초기화되지 않았습니다.")
+            return
+            
+        try:
+            from services.auto_trading_service import TradingSettings
+            
+            buy_settings = self.get_buy_settings()
+            
+            # 설정 객체 생성
+            trading_settings = TradingSettings(
+                condition_idx=buy_settings['condition_idx'],
+                condition_name=buy_settings['condition'],
+                is_market_order=buy_settings['is_market_order'],
+                price_offset=buy_settings['price_offset'],
+                buy_amount=buy_settings['amount'],
+                max_stocks=buy_settings['max_stocks']
+            )
+            
+            # 확인 대화상자
+            reply = QMessageBox.question(
+                self, 
+                "자동매매 시작", 
+                f"다음 설정으로 자동매매를 시작하시겠습니까?\n\n"
+                f"조건식: {trading_settings.condition_name}\n"
+                f"매수금액: {trading_settings.buy_amount:,}원\n"
+                f"최대종목: {trading_settings.max_stocks}개\n"
+                f"매수방식: {'시장가' if trading_settings.is_market_order else '지정가'}\n\n"
+                f"⚠️ 실제 거래가 실행됩니다!",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # 자동매매 시작
+                self.auto_trading_service.start_auto_trading(trading_settings)
+                
+                # UI 상태 변경
+                self.start_auto_btn.setVisible(False)
+                self.stop_auto_btn.setVisible(True)
+                self.auto_trading_active = True
+                
+                # 설정 변경 방지
+                self.save_btn.setEnabled(False)
+                
+                print("🚀 자동매매 시작됨")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "자동매매 시작 오류", f"자동매매 시작 중 오류가 발생했습니다:\n{e}")
+            print(f"❌ 자동매매 시작 오류: {e}")
+            
+    def stop_auto_trading(self):
+        """자동매매 중지"""
+        if not self.auto_trading_service:
+            return
+            
+        try:
+            reply = QMessageBox.question(
+                self, 
+                "자동매매 중지", 
+                "자동매매를 중지하시겠습니까?\n\n"
+                "⚠️ 진행 중인 주문은 그대로 유지됩니다.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # 자동매매 중지
+                self.auto_trading_service.stop_auto_trading()
+                
+                # UI 상태 변경
+                self.start_auto_btn.setVisible(True)
+                self.stop_auto_btn.setVisible(False)
+                self.auto_trading_active = False
+                
+                # 설정 변경 허용
+                self.save_btn.setEnabled(True)
+                
+                print("⏹️ 자동매매 중지됨")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "자동매매 중지 오류", f"자동매매 중지 중 오류가 발생했습니다:\n{e}")
+            print(f"❌ 자동매매 중지 오류: {e}")
+            
+    def on_position_added(self, position_data):
+        """새로운 포지션 추가됨"""
+        print(f"💰 새로운 매수: {position_data['stock_code']} {position_data['quantity']}주")
+        
+        # 알림 메시지 (옵션)
+        if hasattr(self, 'show_trading_notifications') and self.show_trading_notifications:
+            self.show_notification(f"매수 완료: {position_data['stock_code']}")
+            
+    def on_trading_status_changed(self, status):
+        """자동매매 상태 변경"""
+        self.status_label.setText(status)
+        
+        if status == "실행 중":
+            self.status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        elif status == "중지됨":
+            self.status_label.setStyleSheet("color: #7f8c8d; font-weight: bold;")
+        else:
+            self.status_label.setStyleSheet("color: #3498db; font-weight: bold;")
+            
+    def on_trading_error(self, error):
+        """자동매매 오류 발생"""
+        print(f"❌ 자동매매 오류: {error}")
+        QMessageBox.warning(self, "자동매매 오류", f"자동매매 중 오류가 발생했습니다:\n{error}")
+        
+    def update_trading_status(self):
+        """자동매매 상태 업데이트"""
+        if not self.auto_trading_service:
+            return
+            
+        try:
+            status = self.auto_trading_service.get_status()
+            
+            # 상태 정보 업데이트
+            self.position_count_label.setText(f"{status['total_positions']}개")
+            self.pending_orders_label.setText(f"{status['pending_orders']}개")
+            self.monitoring_stocks_label.setText(f"{status['monitoring_stocks']}개")
+            
+        except Exception as e:
+            print(f"❌ 상태 업데이트 오류: {e}")
         
     def update_condition_list(self, condition_list):
         """조건검색 목록 업데이트"""
@@ -458,7 +711,24 @@ class OrderSettingsWidget(QWidget):
             print(f"조건검색 결과 창 로드 실패: {e}")
             QMessageBox.warning(self, "모듈 오류", "조건검색 결과 창을 열 수 없습니다.")
             
+    def show_notification(self, message):
+        """시스템 알림 표시 (옵션)"""
+        # 간단한 상태바 메시지로 대체
+        if hasattr(self.parent(), 'statusBar'):
+            self.parent().statusBar().showMessage(message, 3000)
+            
     def closeEvent(self, event):
         """위젯 닫기 이벤트"""
+        if self.auto_trading_active:
+            reply = QMessageBox.question(
+                self, 
+                "자동매매 실행 중", 
+                "자동매매가 실행 중입니다.\n정말 종료하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
+                
         self.cleanup()
         event.accept()
